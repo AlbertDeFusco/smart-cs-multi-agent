@@ -16,6 +16,20 @@ from langchain_openai import ChatOpenAI
 from memory.long_term import LongTermMemory
 from tracing.otel_config import trace_agent_call
 
+try:
+    from opentelemetry import trace as _otel_trace
+except ImportError:
+    _otel_trace = None
+
+
+def _set_span_attr(key: str, value: object) -> None:
+    """Set attribute on active span if OTel is available. No-op otherwise."""
+    if _otel_trace is None:
+        return
+    span = _otel_trace.get_current_span()
+    if span is not None:
+        span.set_attribute(key, value)
+
 
 RAG_SYSTEM_PROMPT = """You are a professional knowledge base Q&A Agent, responsible for answering user questions based on retrieved documents.
 
@@ -54,12 +68,18 @@ class KnowledgeRAGAgent:
             HumanMessage(content=QUERY_REWRITE_PROMPT.format(query=original_query)),
         ]
         response = await self.llm.ainvoke(messages)
-        return response.content.strip()
+        rewritten = response.content.strip()
+        # harness-forge: detect whether rewriter changed the query
+        _set_span_attr("rag.rewrite.changed", rewritten != original_query)
+        return rewritten
 
     @trace_agent_call("rag_retrieve")
     async def retrieve_documents(self, query: str, top_k: int = 5) -> list[dict]:
         """Retrieve relevant documents from the vector database"""
         docs = self.long_term_memory.search(query, top_k=top_k)
+        # harness-forge: retrieval yield for failure detection
+        _set_span_attr("rag.input.top_k", top_k)
+        _set_span_attr("rag.output.doc_count", len(docs))
         return docs
 
     @trace_agent_call("rag_rerank")
@@ -86,24 +106,37 @@ class KnowledgeRAGAgent:
 
         response = await self.llm.ainvoke(messages)
 
+        fallback_used = False
         try:
             indices = [int(i.strip()) for i in response.content.split(",")]
             reranked = [documents[i] for i in indices if i < len(documents)]
         except (ValueError, IndexError):
             reranked = documents[:top_k]
+            fallback_used = True
 
+        # harness-forge: reranker health indicators
+        _set_span_attr("rag.input.doc_count", len(documents))
+        _set_span_attr("rag.output.doc_count", len(reranked))
+        _set_span_attr("rag.rerank.fallback_used", fallback_used)
         return reranked
 
     @trace_agent_call("rag_generate")
     async def generate_answer(self, query: str, context_docs: list[dict]) -> str:
         """Generate answer based on retrieved documents"""
-        if not context_docs:
+        # harness-forge: context assembly indicators
+        no_context = not context_docs
+        _set_span_attr("rag.generate.no_context", no_context)
+
+        if no_context:
             return "Sorry, no information related to your question was found in the knowledge base. We suggest you contact a human agent for assistance."
 
         context = "\n\n---\n\n".join(
             f"Source: {doc.get('source', 'Unknown')}\nContent: {doc.get('content', '')}"
             for doc in context_docs
         )
+
+        _set_span_attr("rag.input.doc_count", len(context_docs))
+        _set_span_attr("rag.input.context_char_count", len(context))
 
         messages = [
             SystemMessage(content=RAG_SYSTEM_PROMPT),
@@ -114,7 +147,9 @@ class KnowledgeRAGAgent:
         ]
 
         response = await self.llm.ainvoke(messages)
-        return response.content
+        answer = response.content
+        _set_span_attr("rag.output.answer_char_count", len(answer))
+        return answer
 
     @trace_agent_call("knowledge_rag_process")
     async def process(self, state: dict[str, Any]) -> dict[str, Any]:
