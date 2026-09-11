@@ -1,7 +1,9 @@
 """
-知识检索Agent — RAG知识库问答
-负责从向量数据库中检索相关文档，结合上下文生成准确回答。
-实现完整的RAG流程：Query改写 → 向量检索 → 重排序 → 上下文注入 → 生成回答。
+Knowledge Retrieval Agent — RAG Knowledge Base Q&A
+
+Responsible for retrieving relevant documents from a vector database,
+combining context to generate accurate answers.
+Implements the complete RAG pipeline: Query Rewrite → Vector Retrieval → Reranking → Context Injection → Answer Generation.
 """
 
 from __future__ import annotations
@@ -15,31 +17,31 @@ from memory.long_term import LongTermMemory
 from tracing.otel_config import trace_agent_call
 
 
-RAG_SYSTEM_PROMPT = """你是一个专业的知识库问答Agent，负责根据检索到的文档回答用户问题。
+RAG_SYSTEM_PROMPT = """You are a professional knowledge base Q&A Agent, responsible for answering user questions based on retrieved documents.
 
-回答规则：
-1. 严格基于检索到的文档内容回答，不要编造信息
-2. 如果文档中没有相关信息，明确告知用户并建议转人工
-3. 回答要简洁专业，适合客服场景
-4. 对于金融产品信息，必须标注"以上信息仅供参考，具体以合同条款为准"
-5. 在回答末尾标注引用的文档来源
+Answer rules:
+1. Strictly answer based on retrieved document content, do not fabricate information
+2. If the documents contain no relevant information, clearly inform the user and suggest transferring to a human agent
+3. Answers should be concise and professional, suitable for customer service scenarios
+4. For financial product information, must include the note "The above information is for reference only, subject to contract terms"
+5. Cite the referenced document source at the end of the answer
 
-回答格式：
-- 先直接回答用户问题
-- 如有必要补充相关信息
-- 金融场景需添加风险提示
+Answer format:
+- First directly answer the user's question
+- Supplement with related information if necessary
+- Add risk disclaimer for financial scenarios
 """
 
-QUERY_REWRITE_PROMPT = """请将用户的口语化问题改写为更适合向量检索的查询语句。
-保留核心语义，去除口语化表达，补充专业术语。
-只返回改写后的查询，不要其他内容。
+QUERY_REWRITE_PROMPT = """Please rewrite the user's colloquial question into a query statement more suitable for vector retrieval.
+Preserve the core semantics, remove colloquial expressions, and add professional terminology.
+Only return the rewritten query, nothing else.
 
-用户原始问题: {query}
+User's original question: {query}
 """
 
 
 class KnowledgeRAGAgent:
-    """知识检索Agent - 实现完整RAG流程"""
+    """Knowledge Retrieval Agent - Implements complete RAG pipeline"""
 
     def __init__(self, llm: ChatOpenAI, long_term_memory: LongTermMemory | None = None):
         self.llm = llm
@@ -47,7 +49,7 @@ class KnowledgeRAGAgent:
 
     @trace_agent_call("rag_query_rewrite")
     async def rewrite_query(self, original_query: str) -> str:
-        """Query改写：将口语化问题转为检索友好的查询"""
+        """Query rewrite: Transform colloquial questions into retrieval-friendly queries"""
         messages = [
             HumanMessage(content=QUERY_REWRITE_PROMPT.format(query=original_query)),
         ]
@@ -56,7 +58,7 @@ class KnowledgeRAGAgent:
 
     @trace_agent_call("rag_retrieve")
     async def retrieve_documents(self, query: str, top_k: int = 5) -> list[dict]:
-        """从向量数据库检索相关文档"""
+        """Retrieve relevant documents from the vector database"""
         docs = self.long_term_memory.search(query, top_k=top_k)
         return docs
 
@@ -64,7 +66,7 @@ class KnowledgeRAGAgent:
     async def rerank_documents(
         self, query: str, documents: list[dict], top_k: int = 3
     ) -> list[dict]:
-        """对检索结果重排序，提升相关性"""
+        """Rerank retrieval results to improve relevance"""
         if not documents:
             return []
 
@@ -74,11 +76,11 @@ class KnowledgeRAGAgent:
         )
 
         messages = [
-            SystemMessage(content="你是一个文档相关性排序专家。"),
+            SystemMessage(content="You are a document relevance ranking expert."),
             HumanMessage(content=(
-                f"用户查询: {query}\n\n"
-                f"候选文档:\n{doc_summaries}\n\n"
-                f"请返回最相关的{top_k}个文档的索引号，用逗号分隔，如: 0,2,4"
+                f"User query: {query}\n\n"
+                f"Candidate documents:\n{doc_summaries}\n\n"
+                f"Please return the indices of the {top_k} most relevant documents, separated by commas, e.g.: 0,2,4"
             )),
         ]
 
@@ -94,20 +96,20 @@ class KnowledgeRAGAgent:
 
     @trace_agent_call("rag_generate")
     async def generate_answer(self, query: str, context_docs: list[dict]) -> str:
-        """基于检索文档生成回答"""
+        """Generate answer based on retrieved documents"""
         if not context_docs:
-            return "抱歉，知识库中暂未找到与您问题相关的信息。建议您联系人工客服获取帮助。"
+            return "Sorry, no information related to your question was found in the knowledge base. We suggest you contact a human agent for assistance."
 
         context = "\n\n---\n\n".join(
-            f"来源: {doc.get('source', '未知')}\n内容: {doc.get('content', '')}"
+            f"Source: {doc.get('source', 'Unknown')}\nContent: {doc.get('content', '')}"
             for doc in context_docs
         )
 
         messages = [
             SystemMessage(content=RAG_SYSTEM_PROMPT),
             HumanMessage(content=(
-                f"用户问题: {query}\n\n"
-                f"检索到的参考文档:\n{context}"
+                f"User question: {query}\n\n"
+                f"Retrieved reference documents:\n{context}"
             )),
         ]
 
@@ -117,11 +119,11 @@ class KnowledgeRAGAgent:
     @trace_agent_call("knowledge_rag_process")
     async def process(self, state: dict[str, Any]) -> dict[str, Any]:
         """
-        完整RAG流程（作为Graph节点）：
-        1. Query改写
-        2. 向量检索
-        3. 重排序
-        4. 生成回答
+        Complete RAG pipeline (as a Graph node):
+        1. Query rewrite
+        2. Vector retrieval
+        3. Reranking
+        4. Answer generation
         """
         messages = state.get("messages", [])
         if not messages:
